@@ -1,0 +1,762 @@
+---
+title: "MovieLens Project 2020"
+author: "Christopher James Page"
+date: "7/20/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction/Overview/Executive Summary
+
+The purpose of the MovieLens Project 2020 effort was to develop an algorithm capable of predicting movie ratings with a commercially viable level of accuracy, quantified as the Root Means Square Error (RMSE).  Using EDX, a data set constructed by a random sampling of ninety percent of the MovieLens data available at http://files.grouplens.org/datasets/movielens/ml-10m.zip, the author assembled and evaluated nineteen algorithms before selecting the one that generated the lowest RMSE when applied to the EDX test set. That algorithm accounted for the regularized effects of three predictors: (a) the movie being rated, (b) the user registering the rating, and (c) the month in which the rating was registered.  It generated an RMSE of less than 0.884 against the EDX test set.  The expectation is that it will generate a similar RMSE against a VALIDATION set formed from the remaining ten percent of the original MovieLens data.
+
+## Method/Analysis
+
+The first step was to load the necessary libraries from the repository http://cran.us.r-project.org.  Those libraries included not only the prescribed tidyverse, caret, and data.table but lubridate.  Lubridate was needed in order to make effective use of the timestamp data included in MovieLens and its EDX and VALIDATE extracts.
+
+```{r loading-libraries, message=FALSE, echo=FALSE}
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+
+```
+
+The second step entailed loading the MovieLens set from http://files.grouplens.org/datasets/movielens/ml-10m.zip and then wrangling the data in a manner that would result in ready access to information detailing the unique identifiers, titles, and genres of the individual movies; the unique identifiers of the people who had registered ratings; and the times when those people registered each of their ratings.
+
+The third step was to generate the EDX and VALIDATION data sets.  The EDX data set was used to develop the movie rating prediction algorithms.  It was separated into TRAIN and TEST data sets. The VALIDATION data set was set-aside to evaluate the RMSE of the final algorithm. RMSE is the typical error made we make when predicting a movie rating.
+
+``` {r loading-and-wrangling-data, echo=FALSE}
+ 
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 4.0 or later
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                            title = as.character(title),
+                                            genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+      semi_join(edx, by = "movieId") %>%
+      semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+library(caret)
+set.seed(755)
+test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.2,
+                                   list = FALSE)
+ 
+edx_train_set <- edx[-test_index,]
+ 
+edx_test_set <- edx[test_index,]
+
+edx_test_set <- edx_test_set %>%
+     semi_join(edx_train_set, by = "movieId") %>%
+     semi_join(edx_train_set, by = "userId")
+
+RMSE <- function(true_ratings, predicted_ratings){
+     sqrt(mean((true_ratings - predicted_ratings)^2))
+ }
+
+```
+
+The next set of steps involved examining and assessing the following nineteen algorithms:
+
+#### Algorithm 01 (Average Rating).
+
+The first algorithm made predictions based solely on the EDX training set's average movie rating.
+
+``` {r generating Algorithm 01}
+
+mu <- mean(edx_train_set$rating)
+
+predicted_ratings_algorithm_01 <- mu
+
+RMSE01 <- RMSE(predicted_ratings_algorithm_01, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an unacceptably high RMSE of
+``` {r printing RMSE for Algorithm 01, echo=FALSE}
+RMSE01
+```
+
+#### Algorithm 02 (Average Rating plus Movie Effects).
+
+The second algorithm made predictions based on the EDX training set's average movie rating plus the effects of the movies being rated.
+
+``` {r generating Algorithm 02}
+
+mu <- mean(edx_train_set$rating)
+
+movie_avgs <- edx_train_set %>%
+     group_by(movieId) %>%
+     summarize(b_i = mean(rating - mu))
+
+predicted_ratings_algorithm_02 <- mu + edx_test_set %>%
+     left_join(movie_avgs, by='movieId') %>%
+     pull(b_i)
+
+RMSE02 <- RMSE(predicted_ratings_algorithm_02, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded a better but still too high RMSE of 
+``` {r printing RMSE for Algorithm 02, echo=FALSE}
+RMSE02
+```
+
+#### Algorithm 03 (Average Rating plus Regularized Movie Effects).
+
+The third algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the movies being rated.
+
+``` {r generating Algorithm 03}
+
+lambdas <- seq(0, 30, 0.25)
+
+mu <- mean(edx_train_set$rating)
+
+movie_avgs <- edx_train_set %>%
+     group_by(movieId) %>%
+     summarize(s = sum(rating - mu), n_i = n())
+rmses <- sapply(lambdas, function(l){
+     predicted_ratings <- edx_test_set %>%
+         left_join(movie_avgs, by='movieId') %>%
+         mutate(b_i = s/(n_i+l)) %>%
+         mutate(pred = mu + b_i) %>%
+         pull(pred)
+     return(RMSE(predicted_ratings, edx_test_set$rating))
+ })
+lambda03 <- lambdas[which.min(rmses)]
+
+movie_reg_avgs <- edx_train_set %>%
+     group_by(movieId) %>%
+     summarize(b_i = sum(rating - mu)/(n()+lambda03), n_i = n())
+
+predicted_ratings_algorithm_03 <- edx_test_set %>%
+     left_join(movie_reg_avgs, by='movieId') %>%
+     mutate(pred = mu + b_i) %>%
+     pull(pred)
+
+RMSE03 <- RMSE(predicted_ratings_algorithm_03, edx_test_set$rating)
+```
+When applied to the EDX test set, this algorithm yielded a slightly improved RMSE of
+``` {r printing RMSE for Algorithm 03, echo=FALSE}
+RMSE03
+```
+
+#### Algorithm 4 (Averate Rating plus User Effects).
+
+The fourth algorithm made predictions based on the EDX training set's average movie rating plus the effects of the users registering the ratings.
+
+``` {r generating Algorithm 04}
+
+mu <- mean(edx_train_set$rating)
+
+user_avgs <- edx_train_set %>%
+     group_by(userId) %>%
+     summarize(b_u = mean(rating - mu))
+
+predicted_ratings_algorithm_04 <- mu + edx_test_set %>%
+    left_join(user_avgs, by='userId') %>%
+    pull(b_u)
+
+RMSE04 <- RMSE(predicted_ratings_algorithm_04, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 04, echo=FALSE}
+RMSE04
+```
+
+#### Algorithm 5 (Average Rating plus Regularized User Effects).
+
+The fifth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the users registering the ratings.
+
+``` {r generating Algorithm 05}
+
+lambdas <- seq(0, 30, 0.25)
+
+mu <- mean(edx_train_set$rating)
+
+user_avgs <- edx_train_set %>%
+     group_by(userId) %>%
+     summarize(s = sum(rating - mu), n_i = n())
+rmses <- sapply(lambdas, function(l){
+     predicted_ratings <- edx_test_set %>%
+         left_join(user_avgs, by='userId') %>%
+         mutate(b_u = s/(n_i+l)) %>%
+         mutate(pred = mu + b_u) %>%
+         pull(pred)
+     return(RMSE(predicted_ratings, edx_test_set$rating))
+ })
+lambda05 <- lambdas[which.min(rmses)]
+
+
+lambda <- lambda05
+
+user_reg_avgs <- edx_train_set %>%
+     group_by(userId) %>%
+     summarize(b_u = sum(rating - mu)/(n()+lambda), n_i = n())
+
+predicted_ratings_algorithm_05 <- edx_test_set %>%
+     left_join(user_reg_avgs, by='userId') %>%
+     mutate(pred = mu + b_u) %>%
+     pull(pred)
+
+RMSE05 <- RMSE(predicted_ratings_algorithm_05, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 05, echo=FALSE}
+RMSE05
+```
+
+#### Algorithm 6 (Average Rating plus Genre Effects).
+
+The sixth algorithm made predictions based on the EDX training set's average movie rating plus the effects of the genres of the movies being rated.
+
+``` {r generating Algorithm 06}
+
+mu <- mean(edx_train_set$rating)
+
+genre_avgs <- edx_train_set %>%
+     group_by(genres) %>%
+     summarize(b_v = mean(rating - mu))
+
+predicted_ratings_algorithm_06 <- mu + edx_test_set %>%
+     left_join(genre_avgs, by='genres') %>%
+     pull(b_v)
+
+RMSE06 <- RMSE(predicted_ratings_algorithm_06, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 06, echo=FALSE}
+RMSE06
+```
+
+#### Algorithm 7 (Average Rating plus Regularized Genre Effects).
+
+The seventh algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the genres of the movies being rated.
+
+``` {r generating Algorithm 07}
+
+lambdas <- seq(0, 30, 0.25)
+
+mu <- mean(edx_train_set$rating)
+
+genre_avgs <- edx_train_set %>%
+     group_by(genres) %>%
+     summarize(s = sum(rating - mu), n_i = n())
+rmses <- sapply(lambdas, function(l){
+     predicted_ratings <- edx_test_set %>%
+         left_join(genre_avgs, by='genres') %>%
+         mutate(b_v = s/(n_i+l)) %>%
+         mutate(pred = mu + b_v) %>%
+         pull(pred)
+     return(RMSE(predicted_ratings, edx_test_set$rating))
+ })
+lambda07 <- lambdas[which.min(rmses)]
+
+lambda <- lambda07
+
+genre_reg_avgs <- edx_train_set %>%
+     group_by(genres) %>%
+     summarize(b_v = sum(rating - mu)/(n()+lambda), n_i = n())
+
+predicted_ratings_algorithm_07 <- edx_test_set %>%
+     left_join(genre_reg_avgs, by='genres') %>%
+     mutate(pred = mu + b_v) %>%
+     pull(pred)
+
+RMSE07 <- RMSE(predicted_ratings_algorithm_07, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 07, echo=FALSE}
+RMSE07
+```
+
+#### Algorithm 8 (Average Rating plus Month Effects).
+
+The eighth algorithm made predictions based on the EDX training set's average movie rating plus the effects of the months when the movies were rated.
+
+``` {r generating Algorithm 08}
+
+mu <- mean(edx_train_set$rating)
+
+monthly_avgs <- edx_train_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     group_by(monthId) %>%
+     summarize(b_t = mean(rating - mu))
+
+predicted_ratings_algorithm_08 <- mu + edx_test_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     left_join(monthly_avgs, by='monthId') %>%
+     pull(b_t)
+
+RMSE08 <- RMSE(predicted_ratings_algorithm_08, edx_test_set$rating)
+
+``` 
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 08, echo=FALSE}
+RMSE08
+```
+
+#### Algorithm 9 (Average Rating plus Regularized Month Effects).
+
+The ninth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the months when the movies were rated.
+``` {r generating Algorithm 09}
+lambdas <- seq(0, 50, 0.25)
+
+mu <- mean(edx_train_set$rating)
+
+monthly_avgs <- edx_train_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     group_by(monthId) %>%
+     summarize(s = sum(rating - mu), n_i = n())
+rmses <- sapply(lambdas, function(l){
+     predicted_ratings <- edx_test_set %>%
+         mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+         left_join(monthly_avgs, by='monthId') %>%
+         mutate(b_t = s/(n_i+l)) %>%
+         mutate(pred = mu + b_t) %>%
+         pull(pred)
+     return(RMSE(predicted_ratings, edx_test_set$rating))
+ })
+lambda09 <- lambdas[which.min(rmses)]
+
+lambda <- lambda09
+
+monthly_reg_avgs <- edx_train_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     group_by(monthId) %>%
+     summarize(b_t = sum(rating - mu)/(n()+lambda), n_i = n())
+
+predicted_ratings_algorithm_09 <- edx_test_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     left_join(monthly_reg_avgs, by='monthId') %>%
+     mutate(pred = mu + b_t) %>%
+     pull(pred)
+
+RMSE09 <- RMSE(predicted_ratings_algorithm_09, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 09, echo=FALSE}
+RMSE09
+```
+#### Algorithm 10 (Average Rating plus Regularized Month and User Effects).
+
+The tenth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the months when the movies were rated and the users registering the ratings.
+``` {r generating Algorithm 10}
+mu <- mean(edx_train_set$rating)
+
+movie_reg_avgs <- edx_train_set %>%
+     group_by(movieId) %>%
+     summarize(b_i = sum(rating - mu)/(n()+lambda03), n_i = n())
+
+user_reg_avgs <- edx_train_set %>%
+     group_by(userId) %>%
+     summarize(b_u = sum(rating - mu)/(n()+lambda05), n_i = n())
+
+predicted_ratings_algorithm_10 <- edx_test_set %>%
+     left_join(movie_reg_avgs, by='movieId') %>%
+     left_join(user_reg_avgs, by='userId') %>%
+     mutate(pred = mu + b_i + b_u) %>%
+     pull(pred)
+
+RMSE10 <- RMSE(predicted_ratings_algorithm_10, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded a relatively low and promising RMSE of
+``` {r printing RMSE for Algorithm 10, echo=FALSE}
+RMSE10
+```
+#### Algorithm 11 (Average Rating plus Regularized Month and Genre Effects).
+
+The eleventh algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the months when the movies were rated and the genres of the movies being rated.
+``` {r generating Algorithm 11}
+mu <- mean(edx_train_set$rating)
+
+movie_reg_avgs <- edx_train_set %>%
+     group_by(movieId) %>%
+     summarize(b_i = sum(rating - mu)/(n()+lambda03), n_i = n())
+
+genre_reg_avgs <- edx_train_set %>%
+     group_by(genres) %>%
+     summarize(b_v = sum(rating - mu)/(n()+lambda07), n_i = n())
+
+predicted_ratings_algorithm_11 <- edx_test_set %>%
+     left_join(movie_reg_avgs, by='movieId') %>%
+     left_join(genre_reg_avgs, by='genres') %>%
+     mutate(pred = mu + b_i + b_v) %>%
+     pull(pred)
+
+RMSE11 <- RMSE(predicted_ratings_algorithm_11, edx_test_set$rating)
+
+```
+
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 11, echo=FALSE}
+RMSE11
+```
+#### Algorithm 12 (Average Rating plus Regularized Month and Movie Effects).
+
+The twelfth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the months when the movies were rated and the movies being rated.
+``` {r generating Algorithm 12}
+mu <- mean(edx_train_set$rating)
+
+movie_reg_avgs <- edx_train_set %>%
+     group_by(movieId) %>%
+     summarize(b_i = sum(rating - mu)/(n()+lambda03), n_i = n())
+
+monthly_reg_avgs <- edx_train_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     group_by(monthId) %>%
+     summarize(b_t = sum(rating - mu)/(n()+lambda09), n_i = n())
+
+predicted_ratings_algorithm_12 <- edx_test_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     left_join(movie_reg_avgs, by='movieId') %>%
+     left_join(monthly_reg_avgs, by='monthId') %>%
+     mutate(pred = mu + b_i + b_t) %>%
+     pull(pred)
+
+RMSE12 <- RMSE(predicted_ratings_algorithm_12, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 12, echo=FALSE}
+RMSE12
+```
+####  Algorithm 13 (Average Rating plus Regularized User and Genre Effects).
+
+The thirteenth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the users registering the ratings and the movies being rated.
+``` {r generating Algorithm 13}
+mu <- mean(edx_train_set$rating)
+
+user_reg_avgs <- edx_train_set %>%
+     group_by(userId) %>%
+     summarize(b_u = sum(rating - mu)/(n()+lambda05), n_i = n())
+
+genre_reg_avgs <- edx_train_set %>%
+     group_by(genres) %>%
+     summarize(b_v = sum(rating - mu)/(n()+lambda07), n_i = n())
+
+predicted_ratings_algorithm_13 <- edx_test_set %>%
+     left_join(user_reg_avgs, by='userId') %>%
+     left_join(genre_reg_avgs, by='genres') %>%
+     mutate(pred = mu + b_u + b_v) %>%
+     pull(pred)
+
+RMSE13 <- RMSE(predicted_ratings_algorithm_13, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 13, echo=FALSE}
+RMSE13
+```
+
+####  Algorithm 14 (Average Rating plus Regularized User and Month Effects).
+
+The fourteenth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the users registering the ratings and the months when the ratings were registered.
+``` {r generating Algorithm 14}
+mu <- mean(edx_train_set$rating)
+
+user_reg_avgs <- edx_train_set %>%
+     group_by(userId) %>%
+     summarize(b_u = sum(rating - mu)/(n()+lambda05), n_i = n())
+
+monthly_reg_avgs <- edx_train_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     group_by(monthId) %>%
+     summarize(b_t = sum(rating - mu)/(n()+lambda09), n_i = n())
+
+predicted_ratings_algorithm_14 <- edx_test_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     left_join(user_reg_avgs, by='userId') %>%
+     left_join(monthly_reg_avgs, by='monthId') %>%
+     mutate(pred = mu + b_u + b_t) %>%
+     pull(pred)
+
+RMSE14 <- RMSE(predicted_ratings_algorithm_14, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 14, echo=FALSE}
+RMSE14
+```
+
+####  Algorithm 15 (Average Rating plus Regularized Movie, User, and Genre Effects).
+
+The fifteenth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the movies being rated, the users registering the ratings, and the movies' genres.
+``` {r generating Algorithm 15}
+mu <- mean(edx_train_set$rating)
+
+movie_reg_avgs <- edx_train_set %>%
+     group_by(movieId) %>%
+     summarize(b_i = sum(rating - mu)/(n()+lambda03), n_i = n())
+
+user_reg_avgs <- edx_train_set %>%
+     group_by(userId) %>%
+     summarize(b_u = sum(rating - mu)/(n()+lambda05), n_i = n())
+
+genre_reg_avgs <- edx_train_set %>%
+     group_by(genres) %>%
+     summarize(b_v = sum(rating - mu)/(n()+lambda07), n_i = n())
+
+predicted_ratings_algorithm_15 <- edx_test_set %>%
+     left_join(movie_reg_avgs, by='movieId') %>%
+     left_join(user_reg_avgs, by='userId') %>%
+     left_join(genre_reg_avgs, by='genres') %>%
+     mutate(pred = mu + b_u + b_v) %>%
+     pull(pred)
+
+RMSE15 <- RMSE(predicted_ratings_algorithm_15, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 15, echo=FALSE}
+RMSE15
+```
+
+####  Algorithm 16 (Average Rating plus Regularized Movie, User, and Month Effects).
+
+The sixteenth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the movies being rated, the users registering the ratings, and the months when the ratings were registered.
+``` {r generating Algorithm 16}
+mu <- mean(edx_train_set$rating)
+
+movie_reg_avgs <- edx_train_set %>%
+     group_by(movieId) %>%
+     summarize(b_i = sum(rating - mu)/(n()+lambda03), n_i = n())
+
+user_reg_avgs <- edx_train_set %>%
+     group_by(userId) %>%
+     summarize(b_u = sum(rating - mu)/(n()+lambda05), n_i = n())
+
+monthly_reg_avgs <- edx_train_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     group_by(monthId) %>%
+     summarize(b_t = sum(rating - mu)/(n()+lambda09), n_i = n())
+
+predicted_ratings_algorithm_16 <- edx_test_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     left_join(movie_reg_avgs, by='movieId') %>%
+     left_join(user_reg_avgs, by='userId') %>%
+     left_join(monthly_reg_avgs, by='monthId') %>%
+     mutate(pred = mu + b_i + b_u + b_t) %>%
+     pull(pred)
+
+RMSE16 <- RMSE(predicted_ratings_algorithm_16, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded another relatively low and promising RMSE, this time of
+``` {r printing RMSE for Algorithm 16, echo=FALSE}
+RMSE16
+```
+
+####  Algorithm 17 (Average Rating plus Regularized Movie, Genre, and Month Effects).
+
+The seventeenth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the movies being rated, the movies' genres, and the months when the ratings were registered.
+``` {r generating Algorithm 17}
+
+mu <- mean(edx_train_set$rating)
+
+movie_reg_avgs <- edx_train_set %>%
+     group_by(movieId) %>%
+     summarize(b_i = sum(rating - mu)/(n()+lambda03), n_i = n())
+
+genre_reg_avgs <- edx_train_set %>%
+     group_by(genres) %>%
+     summarize(b_v = sum(rating - mu)/(n()+lambda07), n_i = n())
+
+monthly_reg_avgs <- edx_train_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     group_by(monthId) %>%
+     summarize(b_t = sum(rating - mu)/(n()+lambda09), n_i = n())
+
+predicted_ratings_algorithm_17 <- edx_test_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     left_join(movie_reg_avgs, by='movieId') %>%
+     left_join(genre_reg_avgs, by='genres') %>%
+     left_join(monthly_reg_avgs, by='monthId') %>%
+     mutate(pred = mu + b_i + b_v + b_t) %>%
+     pull(pred)
+
+RMSE17 <- RMSE(predicted_ratings_algorithm_17, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 17, echo=FALSE}
+RMSE17
+```
+
+####  Algorithm 18 (Average Rating plus Regularized User, Genre, and Month Effects).
+
+The eighteenth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the users reigsetring the ratings, the movies' genres, and the months when the ratings were registered.
+``` {r generating Algorithm 18}
+mu <- mean(edx_train_set$rating)
+
+user_reg_avgs <- edx_train_set %>%
+     group_by(userId) %>%
+     summarize(b_u = sum(rating - mu)/(n()+lambda05), n_i = n())
+
+genre_reg_avgs <- edx_train_set %>%
+     group_by(genres) %>%
+     summarize(b_v = sum(rating - mu)/(n()+lambda07), n_i = n())
+
+monthly_reg_avgs <- edx_train_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     group_by(monthId) %>%
+     summarize(b_t = sum(rating - mu)/(n()+lambda09), n_i = n())
+
+predicted_ratings_algorithm_18 <- edx_test_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     left_join(user_reg_avgs, by='userId') %>%
+     left_join(genre_reg_avgs, by='genres') %>%
+     left_join(monthly_reg_avgs, by='monthId') %>%
+     mutate(pred = mu + b_u + b_v + b_t) %>%
+     pull(pred)
+
+RMSE18 <- RMSE(predicted_ratings_algorithm_18, edx_test_set$rating)
+
+```
+
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 18, echo=FALSE}
+RMSE18
+```
+
+####  Algorithm 19 (Average Rating plus Regularized Movie, User, Genre, and Month Effects).
+
+The nineteeth algorithm made predictions based on the EDX training set's average movie rating plus the regularized effects of the movies being rated, the users submitting the ratings, the movies's genres, and the months when the ratings were registered.
+``` {r generating Algorithm 19}
+mu <- mean(edx_train_set$rating)
+
+movie_reg_avgs <- edx_train_set %>%
+     group_by(movieId) %>%
+     summarize(b_i = sum(rating - mu)/(n()+lambda03), n_i = n())
+
+user_reg_avgs <- edx_train_set %>%
+     group_by(userId) %>%
+     summarize(b_u = sum(rating - mu)/(n()+lambda05), n_i = n())
+
+genre_reg_avgs <- edx_train_set %>%
+     group_by(genres) %>%
+     summarize(b_v = sum(rating - mu)/(n()+lambda07), n_i = n())
+
+monthly_reg_avgs <- edx_train_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     group_by(monthId) %>%
+     summarize(b_t = sum(rating - mu)/(n()+lambda09), n_i = n())
+
+predicted_ratings_algorithm_19 <- edx_test_set %>%
+     mutate(monthId = round_date(as_datetime(timestamp), unit = "month")) %>%
+     left_join(movie_reg_avgs, by='movieId') %>%
+     left_join(user_reg_avgs, by='userId') %>%
+     left_join(genre_reg_avgs, by='genres') %>%
+     left_join(monthly_reg_avgs, by='monthId') %>%
+     mutate(pred = mu + b_i + b_u + b_v + b_t) %>%
+     pull(pred)
+
+RMSE19 <- RMSE(predicted_ratings_algorithm_19, edx_test_set$rating)
+
+```
+When applied to the EDX test set, this algorithm yielded an RMSE of
+``` {r printing RMSE for Algorithm 19, echo=FALSE}
+RMSE19
+```
+
+## Results
+
+The following table summarizes the results achieved via the nineteen algorithms:
+
+``` {r selecting algorithm with lowest RMSE, echo=FALSE}
+results <- c(RMSE01, 
+             RMSE02, 
+             RMSE03, 
+             RMSE04, 
+             RMSE05, 
+             RMSE06, 
+             RMSE07, 
+             RMSE08, 
+             RMSE09, 
+             RMSE10, 
+             RMSE11, 
+             RMSE12, 
+             RMSE13, 
+             RMSE14, 
+             RMSE15, 
+             RMSE16, 
+             RMSE17, 
+             RMSE18, 
+             RMSE19)
+algorithms <- c("Algorithm 01", 
+                "Algorithm 02",
+                "Algorithm 03",
+                "Algorithm 04",
+                "Algorithm 05",
+                "Algorithm 06",
+                "Algorithm 07",
+                "Algorithm 08",
+                "Algorithm 09",
+                "Algorithm 10",
+                "Algorithm 11",
+                "Algorithm 12",
+                "Algorithm 13",
+                "Algorithm 14",
+                "Algorithm 15",
+                "Algorithm 16",
+                "Algorithm 17",
+                "Algorithm 18",
+                "Algorithm 19")
+results_table <- data.frame(Algorithm = algorithms, RMSE = results)
+results_table%>%
+   arrange(results)
+``` 
+
+The best algorithm was    
+
+``` {r displaying algorithm with lowest RMSE, echo=FALSE}
+best_algorithm <- which.min(results)
+best_algorithm
+
+``` 
+## Conclusion
+
+Summary: The purpose of this project was to select an algorithm capable of predicting movie ratings with a commercially viable RMSE. Nineteen algorithms were developed and evaluated.  The one selected at the end of the evaluation process accounted for the average rating in the EDX training set as well as two other predictors: (a) the movie being rated and (b) the user registering the rating.  It generated an RMSE of less than 0.884 against the EDX test set and should generate a similar RMSE against the VALIDATION set.
+
+Limitations: A review of literature regarding the NETFLIX challenge suggests lower RMSEs could be achieved by incorporating the matrix factorization concepts outlined in Section (33.11.12) of Professor Irizarry's "Introduction to Data Science." The same section offers that the recommenderlab package, outside the scope of the course, is essential to the application of those concepts. Among those project's limitations were ones stemming from the non-use of recommenderlab.
+
+Future Work: The author is interested in exploring recommenderlab and learning more about the advanced application of matrix factorization concepts.  That future work may generate a lower and, therefore, more commercially viable RMSE.
+
+
+
+
