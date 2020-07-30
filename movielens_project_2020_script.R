@@ -12,7 +12,7 @@ if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-
 
 ### The second step entailed loading and wrangling the MovieLens set from http://files.grouplens.org/datasets/movielens/ml-10m.zip
 
-l <- tempfile()
+dl <- tempfile()
 download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
 
 ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
